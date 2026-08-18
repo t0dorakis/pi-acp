@@ -49,12 +49,14 @@ export type StopReason = 'end_turn' | 'cancelled' | 'error'
 export type SessionPromptResult = {
   stopReason: StopReason
   usage?: Usage
+  _meta?: Record<string, unknown>
 }
 
 type PendingTurn = {
   resolve: (result: SessionPromptResult) => void
   reject: (err: unknown) => void
   beforeUsage: PiUsageSnapshot | null
+  leanSubagentSettlements?: Record<string, unknown>
 }
 
 type QueuedTurn = {
@@ -558,9 +560,12 @@ export class PiAcpSession {
       pending.reject(finalOutcome.error)
     } else {
       const usage = pending.beforeUsage && afterUsage ? promptUsageDelta(pending.beforeUsage, afterUsage) : null
+      const settlements = pending.leanSubagentSettlements
+      pending.leanSubagentSettlements = undefined
       pending.resolve({
         stopReason: finalOutcome.stopReason,
-        ...(usage ? { usage } : {})
+        ...(usage ? { usage } : {}),
+        ...(settlements ? { _meta: { helix: { leanSubagentSettlements: settlements } } } : {})
       })
     }
 
@@ -839,6 +844,20 @@ export class PiAcpSession {
         })
 
         this.cleanupToolCall(toolCallId)
+        break
+      }
+
+      case 'entry_appended': {
+        const entry = (ev as any).entry
+        if (entry?.customType !== 'lean-subagent-settlements' || !this.pendingTurn) break
+
+        const data = entry.data
+        if (!data || typeof data !== 'object' || Array.isArray(data) || (data as any).version !== 1) {
+          console.debug('Ignoring invalid lean-subagent-settlements entry: expected version 1')
+          break
+        }
+
+        this.pendingTurn.leanSubagentSettlements = data as Record<string, unknown>
         break
       }
 
