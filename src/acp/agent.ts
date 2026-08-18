@@ -892,7 +892,11 @@ export class PiAcpAgent implements ACPAgent {
     const stopReason: StopReason =
       result.stopReason === 'error' ? (session.wasCancelRequested() ? 'cancelled' : 'end_turn') : result.stopReason
 
-    return { stopReason, ...(result.usage ? { usage: result.usage } : {}) }
+    return {
+      stopReason,
+      ...(result.usage ? { usage: result.usage } : {}),
+      ...(result._meta ? { _meta: result._meta } : {})
+    }
   }
 
   async cancel(params: CancelNotification): Promise<void> {
