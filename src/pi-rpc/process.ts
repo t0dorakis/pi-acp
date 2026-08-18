@@ -17,6 +17,8 @@ export class PiRpcSpawnError extends Error {
 const ESC = String.fromCharCode(0x1b)
 const CSI = String.fromCharCode(0x9b)
 
+const SESSION_STATS_TIMEOUT_MS = 1_000
+
 const ANSI_ESCAPE_REGEX = new RegExp(
   `[${ESC}${CSI}][[\\]()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]`,
   'g'
@@ -285,7 +287,7 @@ export class PiRpcProcess {
   }
 
   async getSessionStats(): Promise<unknown> {
-    const res = await this.request({ type: 'get_session_stats' })
+    const res = await this.request({ type: 'get_session_stats' }, SESSION_STATS_TIMEOUT_MS)
     if (!res.success) throw new Error(`pi get_session_stats failed: ${res.error ?? JSON.stringify(res.data)}`)
     return res.data
   }
@@ -323,18 +325,37 @@ export class PiRpcProcess {
     await this.writeLine(`${JSON.stringify({ type: 'extension_ui_response', ...response })}\n`)
   }
 
-  private request(cmd: PiRpcCommand): Promise<PiRpcResponse> {
+  private request(cmd: PiRpcCommand, timeoutMs?: number): Promise<PiRpcResponse> {
     const id = crypto.randomUUID()
     const withId = { ...cmd, id }
-
     const line = `${JSON.stringify(withId)}\n`
 
     return new Promise<PiRpcResponse>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject })
+      let timeout: NodeJS.Timeout | undefined
+      const clearRequestTimeout = () => {
+        if (timeout !== undefined) clearTimeout(timeout)
+      }
+      const resolveRequest = (response: PiRpcResponse) => {
+        clearRequestTimeout()
+        resolve(response)
+      }
+      const rejectRequest = (error: unknown) => {
+        clearRequestTimeout()
+        reject(error)
+      }
+
+      this.pending.set(id, { resolve: resolveRequest, reject: rejectRequest })
+      if (timeoutMs !== undefined) {
+        timeout = setTimeout(() => {
+          if (this.pending.delete(id)) {
+            rejectRequest(new Error(`pi ${cmd.type} timed out after ${timeoutMs}ms`))
+          }
+        }, timeoutMs)
+      }
 
       void this.writeLine(line).catch(error => {
         this.pending.delete(id)
-        reject(error)
+        rejectRequest(error)
       })
     })
   }

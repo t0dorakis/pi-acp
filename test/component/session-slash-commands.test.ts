@@ -24,6 +24,7 @@ test('PiAcpSession: expands /command before sending to pi', async () => {
   })
 
   const p = session.prompt('/hello world')
+  await new Promise(resolve => setTimeout(resolve, 0))
 
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
@@ -31,7 +32,7 @@ test('PiAcpSession: expands /command before sending to pi', async () => {
   proc.emit({ type: 'agent_settled' })
   const reason = await p
 
-  assert.equal(reason, 'end_turn')
+  assert.deepEqual(reason, { stopReason: 'end_turn' })
   assert.equal(proc.prompts.length, 1)
   assert.equal(proc.prompts[0]!.message, 'Expanded world')
 })

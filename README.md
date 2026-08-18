@@ -15,6 +15,10 @@ Expect some minor breaking changes.
 - Streams assistant output as ACP `agent_message_chunk`
 - Maps pi tool execution to ACP `tool_call` / `tool_call_update`
   - Tool call locations are surfaced when available for ACP clients that support opening the referenced file/context
+- Reports Pi-owned accounting in standard ACP fields for model-backed prompts
+  - Baseline and final `usage_update` notifications carry current context occupancy and cumulative USD cost
+  - `PromptResponse.usage` carries the prompt's input, output, and cache token deltas
+  - Missing or inconsistent Pi statistics are omitted rather than estimated
   - Relative file paths from pi are resolved against the session cwd before being emitted as ACP tool locations, which enables follow-along features in clients like Zed
   - For `edit`, `pi-acp` attempts to infer a 1-based line number from a unique `oldText` match in the pre-edit file snapshot and includes it in the emitted tool location when possible
   - For `edit`, `pi-acp` snapshots the file before the tool runs and emits an ACP **structured diff** (`oldText`/`newText`) on completion when possible
@@ -197,6 +201,7 @@ Project layout:
 - No ACP filesystem delegation (`fs/*`) and no ACP terminal delegation (`terminal/*`). pi reads/writes and executes locally.
 - MCP servers are accepted in ACP params and stored in session state, but not wired through to pi in this adapter. If you use [pi MCP adapter](https://github.com/nicobailon/pi-mcp-adapter) it will be available in the ACP client.
 - Assistant streaming is currently sent as `agent_message_chunk` (no separate thought stream).
+- Adapter-handled built-in commands do not return `PromptResponse.usage`; model-backed prompts and file-based command expansions do.
 - Queue is implemented client-side and should work like pi's `one-at-a-time`
 - ~~ACP clients don't yet suport session history, but ACP sessions from `pi-acp` can be `/resume`d in pi directly~~
 

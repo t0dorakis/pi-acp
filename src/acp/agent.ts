@@ -437,7 +437,10 @@ export class PiAcpAgent implements ACPAgent {
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
     const session = await this.restoreSession(params.sessionId)
+    return this.executePrompt(params, session)
+  }
 
+  private async executePrompt(params: PromptRequest, session: PiAcpSession): Promise<PromptResponse> {
     const { message, images } = promptToPiMessage(params.prompt)
 
     // Built-in ACP slash command handling (headless-friendly subset).
@@ -887,9 +890,9 @@ export class PiAcpAgent implements ACPAgent {
     // ACP StopReason does not include "error"; if pi fails we map to end_turn for now,
     // unless we know this was a cancellation.
     const stopReason: StopReason =
-      result === 'error' ? (session.wasCancelRequested() ? 'cancelled' : 'end_turn') : result
+      result.stopReason === 'error' ? (session.wasCancelRequested() ? 'cancelled' : 'end_turn') : result.stopReason
 
-    return { stopReason }
+    return { stopReason, ...(result.usage ? { usage: result.usage } : {}) }
   }
 
   async cancel(params: CancelNotification): Promise<void> {

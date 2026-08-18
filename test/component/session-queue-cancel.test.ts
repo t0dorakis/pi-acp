@@ -19,6 +19,7 @@ test('PiAcpSession: cancel clears queued prompts', async () => {
   const first = session.prompt('one')
   const second = session.prompt('two')
   const third = session.prompt('three')
+  await new Promise(resolve => setTimeout(resolve, 0))
 
   // first started, second+third queued
   assert.equal(proc.prompts.length, 1)
@@ -28,15 +29,15 @@ test('PiAcpSession: cancel clears queued prompts', async () => {
   assert.equal(proc.abortCount, 1)
 
   // queued prompts should resolve as cancelled
-  assert.equal(await second, 'cancelled')
-  assert.equal(await third, 'cancelled')
+  assert.deepEqual(await second, { stopReason: 'cancelled' })
+  assert.deepEqual(await third, { stopReason: 'cancelled' })
 
   // finish first prompt as cancelled after abort
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
   proc.emit({ type: 'agent_end' })
   proc.emit({ type: 'agent_settled' })
-  assert.equal(await first, 'cancelled')
+  assert.deepEqual(await first, { stopReason: 'cancelled' })
 
   // queue should have been cleared, so no further prompt started
   assert.equal(proc.prompts.length, 1)

@@ -6,6 +6,21 @@ import { join } from 'node:path'
 import { PiAcpSession } from '../../src/acp/session.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
 
+function usageStats(input: number, output: number, cost: number) {
+  return {
+    sessionId: 's1',
+    tokens: {
+      input,
+      output,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: input + output
+    },
+    cost,
+    contextUsage: { tokens: input, contextWindow: 100_000, percent: 0 }
+  }
+}
+
 test('PiAcpSession: emits agent_message_chunk for text_delta', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
@@ -705,7 +720,7 @@ test('PiAcpSession: prompt stays open through retry runs until agent_settled', a
 
   proc.emit({ type: 'agent_settled' })
   const reason = await p
-  assert.equal(reason, 'end_turn')
+  assert.deepEqual(reason, { stopReason: 'end_turn' })
 })
 
 test('PiAcpSession: does not re-emit startup info on first prompt after it was already sent', async () => {
@@ -746,7 +761,7 @@ test('PiAcpSession: does not re-emit startup info on first prompt after it was a
   proc.emit({ type: 'agent_settled' })
 
   const reason = await p
-  assert.equal(reason, 'end_turn')
+  assert.deepEqual(reason, { stopReason: 'end_turn' })
 })
 
 test('PiAcpSession: cancel flips stopReason to cancelled', async () => {
@@ -771,12 +786,57 @@ test('PiAcpSession: cancel flips stopReason to cancelled', async () => {
   const reason = await p
 
   assert.equal(proc.abortCount, 1)
-  assert.equal(reason, 'cancelled')
+  assert.deepEqual(reason, { stopReason: 'cancelled' })
 })
 
-test('PiAcpSession: queues concurrent prompt and starts it after agent_settled', async () => {
+test('PiAcpSession: cancellation during usage finalization wins over end_turn', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
+  let statsCalls = 0
+  let resolveFinalStats: ((value: unknown) => void) | undefined
+  proc.getSessionStats = async () => {
+    statsCalls += 1
+    if (statsCalls === 1) return usageStats(0, 0, 0)
+    return new Promise(resolve => {
+      resolveFinalStats = resolve
+    })
+  }
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const prompt = session.prompt('hello')
+  await new Promise(resolve => setTimeout(resolve, 0))
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
+  await new Promise(resolve => setTimeout(resolve, 0))
+
+  await session.cancel()
+  resolveFinalStats?.(usageStats(2, 1, 0.01))
+
+  assert.deepEqual(await prompt, {
+    stopReason: 'cancelled',
+    usage: {
+      inputTokens: 2,
+      outputTokens: 1,
+      totalTokens: 3,
+      cachedReadTokens: 0,
+      cachedWriteTokens: 0
+    }
+  })
+})
+
+test('PiAcpSession: queues concurrent prompt and attributes usage from each actual start', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  proc.sessionStats = [usageStats(0, 0, 0), usageStats(10, 2, 0.1), usageStats(10, 2, 0.1), usageStats(15, 3, 0.15)]
 
   const session = new PiAcpSession({
     sessionId: 's1',
@@ -790,6 +850,7 @@ test('PiAcpSession: queues concurrent prompt and starts it after agent_settled',
   const first = session.prompt('one')
   const second = session.prompt('two')
 
+  await new Promise(r => setTimeout(r, 0))
   assert.equal(proc.prompts.length, 1)
   assert.equal(proc.prompts[0]!.message, 'one')
 
@@ -799,8 +860,18 @@ test('PiAcpSession: queues concurrent prompt and starts it after agent_settled',
   proc.emit({ type: 'agent_settled' })
 
   const r1 = await first
-  assert.equal(r1, 'end_turn')
+  assert.deepEqual(r1, {
+    stopReason: 'end_turn',
+    usage: {
+      inputTokens: 10,
+      outputTokens: 2,
+      totalTokens: 12,
+      cachedReadTokens: 0,
+      cachedWriteTokens: 0
+    }
+  })
 
+  await new Promise(r => setTimeout(r, 0))
   assert.equal(proc.prompts.length, 2)
   assert.equal(proc.prompts[1]!.message, 'two')
 
@@ -810,12 +881,29 @@ test('PiAcpSession: queues concurrent prompt and starts it after agent_settled',
   proc.emit({ type: 'agent_settled' })
 
   const r2 = await second
-  assert.equal(r2, 'end_turn')
+  assert.deepEqual(r2, {
+    stopReason: 'end_turn',
+    usage: {
+      inputTokens: 5,
+      outputTokens: 1,
+      totalTokens: 6,
+      cachedReadTokens: 0,
+      cachedWriteTokens: 0
+    }
+  })
+
+  assert.deepEqual(
+    conn.updates
+      .filter(update => update.update.sessionUpdate === 'usage_update')
+      .map(update => (update.update as { cost?: { amount: number } }).cost?.amount),
+    [0, 0.1, 0.1, 0.15]
+  )
 })
 
-test('PiAcpSession: cancel clears queued prompts', async () => {
+test('PiAcpSession: cancel clears queued prompts without attributing active usage to them', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
+  proc.sessionStats = [usageStats(20, 4, 0.2), usageStats(23, 5, 0.23)]
 
   const session = new PiAcpSession({
     sessionId: 's1',
@@ -829,6 +917,7 @@ test('PiAcpSession: cancel clears queued prompts', async () => {
   const first = session.prompt('one')
   const second = session.prompt('two')
 
+  await new Promise(r => setTimeout(r, 0))
   assert.equal(proc.prompts.length, 1)
 
   await session.cancel()
@@ -840,8 +929,17 @@ test('PiAcpSession: cancel clears queued prompts', async () => {
   const r1 = await first
   const r2 = await second
 
-  assert.equal(r1, 'cancelled')
-  assert.equal(r2, 'cancelled')
+  assert.deepEqual(r1, {
+    stopReason: 'cancelled',
+    usage: {
+      inputTokens: 3,
+      outputTokens: 1,
+      totalTokens: 4,
+      cachedReadTokens: 0,
+      cachedWriteTokens: 0
+    }
+  })
+  assert.deepEqual(r2, { stopReason: 'cancelled' })
 })
 
 test('PiAcpSession: expands /command before sending to pi', async () => {
@@ -865,6 +963,7 @@ test('PiAcpSession: expands /command before sending to pi', async () => {
   })
 
   const p = session.prompt('/hello world')
+  await new Promise(r => setTimeout(r, 0))
   assert.equal(proc.prompts.length, 1)
   assert.equal(proc.prompts[0]!.message, 'Say hello to world')
 
@@ -874,7 +973,7 @@ test('PiAcpSession: expands /command before sending to pi', async () => {
   proc.emit({ type: 'agent_settled' })
 
   const reason = await p
-  assert.equal(reason, 'end_turn')
+  assert.deepEqual(reason, { stopReason: 'end_turn' })
 })
 
 test('PiAcpSession: tags extension notify chunks with severity in _meta', async () => {
