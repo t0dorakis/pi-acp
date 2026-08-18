@@ -34,8 +34,8 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           npm version --no-git-tag-version "$VERSION"
-          TARBALL="$(npm pack)"
-          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+          npm pack
+          echo "tarball=pi-acp-${VERSION}.tgz" >> "$GITHUB_OUTPUT"
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
