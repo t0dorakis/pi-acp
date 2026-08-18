@@ -29,6 +29,8 @@ export class FakePiRpcProcess {
   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
   readonly extensionUiResponses: unknown[] = []
   abortCount = 0
+  getSessionStatsCount = 0
+  sessionStats: unknown[] = []
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.handlers.push(handler)
@@ -55,6 +57,14 @@ export class FakePiRpcProcess {
 
   async getState(): Promise<any> {
     return {}
+  }
+
+  async getSessionStats(): Promise<unknown> {
+    this.getSessionStatsCount += 1
+    if (this.sessionStats.length === 0) throw new Error('getSessionStats unavailable')
+    const value = this.sessionStats.shift()
+    if (value instanceof Error) throw value
+    return value
   }
 
   async getAvailableModels(): Promise<any> {
