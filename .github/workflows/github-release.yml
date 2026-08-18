@@ -7,39 +7,45 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Generate release notes
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Pack tarball from tag
+        id: pack
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          PREV_TAG=$(git describe --tags --abbrev=0 "${GITHUB_SHA}^" 2>/dev/null || echo "")
+          VERSION="${GITHUB_REF_NAME#v}"
+          npm version --no-git-tag-version "$VERSION"
+          TARBALL="$(npm pack)"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
 
-          if [ -n "$PREV_TAG" ]; then
-            RANGE="${PREV_TAG}..${GITHUB_SHA}"
-            CHANGELOG_URL="https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${TAG}"
-          else
-            RANGE="${TAG}"
-            CHANGELOG_URL="https://github.com/${GITHUB_REPOSITORY}/commits/${TAG}"
-          fi
-
-          {
-            echo "## Changes"
-            echo ""
-            git log --pretty=format:"- %s (%h)" "$RANGE"
-            echo ""
-            echo ""
-            echo "[Full Changelog](${CHANGELOG_URL})"
-          } > release-notes.md
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.pack.outputs.tarball }}
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: ${{ github.ref_name }}
-          body_path: release-notes.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$TARBALL" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
