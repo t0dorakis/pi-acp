@@ -985,11 +985,12 @@ export class PiAcpSession {
     }
 
     if (method === 'notify') {
-      this.emit({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: stringProp(ev, 'message') ?? 'Pi notification' } satisfies ContentBlock,
-        _meta: { piAcp: { notify: { level: stringProp(ev, 'notifyType') ?? 'info' } } }
-      })
+      // An extension UI notification is operator-facing, never model output. ACP has no
+      // notification update, so it goes to stderr instead of the assistant stream, where
+      // clients would otherwise concatenate it into the reply.
+      const level = stringProp(ev, 'notifyType') ?? 'info'
+      const message = stringProp(ev, 'message') ?? 'Pi notification'
+      process.stderr.write(`pi-acp: extension notification [${level}] ${message}\n`)
       await this.proc.sendExtensionUiResponse({ id, cancelled: true })
       return
     }
