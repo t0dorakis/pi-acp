@@ -976,62 +976,73 @@ test('PiAcpSession: expands /command before sending to pi', async () => {
   assert.deepEqual(reason, { stopReason: 'end_turn' })
 })
 
-test('PiAcpSession: tags extension notify chunks with severity in _meta', async () => {
+test('PiAcpSession: routes extension notify to stderr, never to the assistant stream', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
+  const written: string[] = []
+  const originalWrite = process.stderr.write
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    written.push(String(chunk))
+    return true
+  }) as typeof process.stderr.write
 
-  new PiAcpSession({
-    sessionId: 's1',
-    cwd: process.cwd(),
-    mcpServers: [],
-    proc: proc as any,
-    conn: asAgentConn(conn),
-    fileCommands: []
-  })
+  try {
+    new PiAcpSession({
+      sessionId: 's1',
+      cwd: process.cwd(),
+      mcpServers: [],
+      proc: proc as any,
+      conn: asAgentConn(conn),
+      fileCommands: []
+    })
 
-  proc.emit({
-    type: 'extension_ui_request',
-    id: 'n1',
-    method: 'notify',
-    message: 'MCP: connection failed',
-    notifyType: 'error'
-  })
+    proc.emit({
+      type: 'extension_ui_request',
+      id: 'n1',
+      method: 'notify',
+      message: 'MCP: direct tools for exa, context7 will be available after restart',
+      notifyType: 'info'
+    })
 
-  await new Promise(r => setTimeout(r, 0))
+    await new Promise(r => setTimeout(r, 0))
+  } finally {
+    process.stderr.write = originalWrite
+  }
 
-  assert.equal(conn.updates.length, 1)
-  assert.deepEqual(conn.updates[0]!.update, {
-    sessionUpdate: 'agent_message_chunk',
-    content: { type: 'text', text: 'MCP: connection failed' },
-    _meta: { piAcp: { notify: { level: 'error' } } }
-  })
+  assert.equal(conn.updates.length, 0)
+  assert.deepEqual(written, [
+    'pi-acp: extension notification [info] MCP: direct tools for exa, context7 will be available after restart\n'
+  ])
   assert.deepEqual(proc.extensionUiResponses[0], { id: 'n1', cancelled: true })
 })
 
 test('PiAcpSession: defaults notify severity to info when notifyType is absent', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
+  const written: string[] = []
+  const originalWrite = process.stderr.write
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    written.push(String(chunk))
+    return true
+  }) as typeof process.stderr.write
 
-  new PiAcpSession({
-    sessionId: 's1',
-    cwd: process.cwd(),
-    mcpServers: [],
-    proc: proc as any,
-    conn: asAgentConn(conn),
-    fileCommands: []
-  })
+  try {
+    new PiAcpSession({
+      sessionId: 's1',
+      cwd: process.cwd(),
+      mcpServers: [],
+      proc: proc as any,
+      conn: asAgentConn(conn),
+      fileCommands: []
+    })
 
-  proc.emit({
-    type: 'extension_ui_request',
-    id: 'n2',
-    method: 'notify',
-    message: 'heads up'
-  })
+    proc.emit({ type: 'extension_ui_request', id: 'n2', method: 'notify', message: 'heads up' })
 
-  await new Promise(r => setTimeout(r, 0))
+    await new Promise(r => setTimeout(r, 0))
+  } finally {
+    process.stderr.write = originalWrite
+  }
 
-  assert.equal(conn.updates.length, 1)
-  assert.deepEqual((conn.updates[0]!.update as any)._meta, {
-    piAcp: { notify: { level: 'info' } }
-  })
+  assert.equal(conn.updates.length, 0)
+  assert.deepEqual(written, ['pi-acp: extension notification [info] heads up\n'])
 })
