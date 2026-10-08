@@ -70,10 +70,15 @@ export function parsePiUsageSnapshot(value: unknown): PiUsageSnapshot | null {
   }
 
   if (isRecord(value.contextUsage)) {
-    const contextWindow = cumulativeNumber(value.contextUsage.contextWindow)
-    const contextTokens = cumulativeNumber(value.contextUsage.tokens)
-    if (contextWindow !== null && contextWindow > 0 && contextTokens !== null) {
-      snapshot.context = { tokens: contextTokens, contextWindow }
+    const contextWindow = value.contextUsage.contextWindow
+    const contextTokens = value.contextUsage.tokens
+    if (
+      Number.isSafeInteger(contextWindow) &&
+      Number.isSafeInteger(contextTokens) &&
+      (contextWindow as number) > 0 &&
+      (contextTokens as number) >= 0
+    ) {
+      snapshot.context = { tokens: contextTokens as number, contextWindow: contextWindow as number }
     }
   }
 

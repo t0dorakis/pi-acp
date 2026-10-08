@@ -1,5 +1,5 @@
 import type { AgentSideConnection } from '@agentclientprotocol/sdk'
-import type { PiRpcEvent } from '../../src/pi-rpc/process.js'
+import type { PiRpcEvent, PiSessionStats } from '../../src/pi-rpc/process.js'
 
 type SessionUpdateMsg = Parameters<AgentSideConnection['sessionUpdate']>[0]
 
@@ -30,7 +30,11 @@ export class FakePiRpcProcess {
   readonly extensionUiResponses: unknown[] = []
   abortCount = 0
   getSessionStatsCount = 0
-  sessionStats: unknown[] = []
+
+  /** A list is consumed one snapshot per call (an Error entry rejects); an object is returned every time. */
+  sessionStats: PiSessionStats | unknown[] = {}
+  /** When set, `getSessionStats()` rejects with this error. */
+  sessionStatsError: unknown = null
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.handlers.push(handler)
@@ -59,20 +63,27 @@ export class FakePiRpcProcess {
     return {}
   }
 
-  async getSessionStats(): Promise<unknown> {
-    this.getSessionStatsCount += 1
-    if (this.sessionStats.length === 0) throw new Error('getSessionStats unavailable')
-    const value = this.sessionStats.shift()
-    if (value instanceof Error) throw value
-    return value
-  }
 
   async getAvailableModels(): Promise<any> {
     return { models: [{ provider: 'test', id: 'model', name: 'model' }] }
   }
 
+  async getAvailableThinkingLevels(): Promise<string[]> {
+    return ['medium', 'high']
+  }
+
   async getMessages(): Promise<any> {
     return { messages: [] }
+  }
+
+  async getSessionStats(): Promise<PiSessionStats> {
+    this.getSessionStatsCount += 1
+    if (this.sessionStatsError) throw this.sessionStatsError
+    if (!Array.isArray(this.sessionStats)) return this.sessionStats
+    if (this.sessionStats.length === 0) throw new Error('getSessionStats unavailable')
+    const value = this.sessionStats.shift()
+    if (value instanceof Error) throw value
+    return value as PiSessionStats
   }
 }
 
