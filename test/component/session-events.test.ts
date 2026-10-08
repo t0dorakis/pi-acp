@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PiAcpSession } from '../../src/acp/session.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
+import type { PiSessionStats } from '../../src/pi-rpc/process.js'
 
 function usageStats(input: number, output: number, cost: number) {
   return {
@@ -793,7 +794,7 @@ test('PiAcpSession: cancellation during usage finalization wins over end_turn', 
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
   let statsCalls = 0
-  let resolveFinalStats: ((value: unknown) => void) | undefined
+  let resolveFinalStats: ((value: PiSessionStats) => void) | undefined
   proc.getSessionStats = async () => {
     statsCalls += 1
     if (statsCalls === 1) return usageStats(0, 0, 0)
@@ -1045,4 +1046,176 @@ test('PiAcpSession: defaults notify severity to info when notifyType is absent',
 
   assert.equal(conn.updates.length, 0)
   assert.deepEqual(written, ['pi-acp: extension notification [info] heads up\n'])
+})
+
+const zeroUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, cachedReadTokens: 0, cachedWriteTokens: 0 }
+
+function makeUsageSession(proc: FakePiRpcProcess, conn: FakeAgentSideConnection) {
+  return new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+}
+
+test('PiAcpSession: delivers the final usage_update before resolving prompt on agent_settled', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  proc.sessionStats = [usageStats(0, 0, 0), usageStats(10, 2, 0.1)]
+  const session = makeUsageSession(proc, conn)
+
+  // Block delivery of the final usage_update to prove the prompt only resolves once it landed.
+  let usageDeliveries = 0
+  let finalDeliveryStarted: () => void
+  const deliveryStarted = new Promise<void>(resolve => {
+    finalDeliveryStarted = resolve
+  })
+  let releaseDelivery: () => void
+  const deliveryBlocked = new Promise<void>(resolve => {
+    releaseDelivery = resolve
+  })
+
+  const originalSessionUpdate = conn.sessionUpdate.bind(conn)
+  conn.sessionUpdate = async msg => {
+    if (msg.update.sessionUpdate === 'usage_update' && ++usageDeliveries === 2) {
+      finalDeliveryStarted()
+      await deliveryBlocked
+    }
+    await originalSessionUpdate(msg)
+  }
+
+  let resolved = false
+  const p = session.prompt('hello').then(reason => {
+    resolved = true
+    return reason
+  })
+  await new Promise(r => setTimeout(r, 0))
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
+
+  await deliveryStarted
+  assert.equal(resolved, false)
+  releaseDelivery!()
+
+  assert.deepEqual(await p, {
+    stopReason: 'end_turn',
+    usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12, cachedReadTokens: 0, cachedWriteTokens: 0 }
+  })
+  assert.equal(proc.getSessionStatsCount, 2)
+  assert.deepEqual(
+    conn.updates.filter(u => u.update.sessionUpdate === 'usage_update').map(u => u.update),
+    [
+      { sessionUpdate: 'usage_update', used: 0, size: 100_000, cost: { amount: 0, currency: 'USD' } },
+      { sessionUpdate: 'usage_update', used: 10, size: 100_000, cost: { amount: 0.1, currency: 'USD' } }
+    ]
+  )
+})
+
+test('PiAcpSession: skips usage_update when contextUsage tokens are null', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  proc.sessionStats = { ...usageStats(0, 0, 0), contextUsage: { tokens: null, contextWindow: 200_000 } }
+  const session = makeUsageSession(proc, conn)
+
+  const p = session.prompt('hello')
+  await new Promise(r => setTimeout(r, 0))
+  proc.emit({ type: 'agent_settled' })
+
+  assert.deepEqual(await p, { stopReason: 'end_turn', usage: zeroUsage })
+  assert.equal(
+    conn.updates.some(u => u.update.sessionUpdate === 'usage_update'),
+    false
+  )
+})
+
+test('PiAcpSession: skips usage_update for invalid contextUsage values', async () => {
+  const invalid = [
+    { name: 'missing contextUsage', contextUsage: undefined },
+    { name: 'negative tokens', contextUsage: { tokens: -1, contextWindow: 100 } },
+    { name: 'fractional tokens', contextUsage: { tokens: 1.5, contextWindow: 100 } },
+    { name: 'NaN tokens', contextUsage: { tokens: Number.NaN, contextWindow: 100 } },
+    { name: 'zero contextWindow', contextUsage: { tokens: 10, contextWindow: 0 } },
+    { name: 'negative contextWindow', contextUsage: { tokens: 10, contextWindow: -1 } },
+    { name: 'fractional contextWindow', contextUsage: { tokens: 10, contextWindow: 100.5 } },
+    { name: 'null contextWindow', contextUsage: { tokens: 10, contextWindow: null } },
+    { name: 'infinite contextWindow', contextUsage: { tokens: 10, contextWindow: Number.POSITIVE_INFINITY } }
+  ]
+
+  for (const { name, contextUsage } of invalid) {
+    const conn = new FakeAgentSideConnection()
+    const proc = new FakePiRpcProcess()
+    proc.sessionStats = { ...usageStats(0, 0, 0), contextUsage } as any
+    const session = makeUsageSession(proc, conn)
+
+    const p = session.prompt('hello')
+    await new Promise(r => setTimeout(r, 0))
+    proc.emit({ type: 'agent_settled' })
+
+    assert.deepEqual(await p, { stopReason: 'end_turn', usage: zeroUsage }, name)
+    assert.equal(
+      conn.updates.some(u => u.update.sessionUpdate === 'usage_update'),
+      false,
+      name
+    )
+  }
+})
+
+test('PiAcpSession: get_session_stats rejection does not break the prompt', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  proc.sessionStatsError = new Error('pi get_session_stats failed: unsupported')
+  const session = makeUsageSession(proc, conn)
+
+  const p = session.prompt('hello')
+  await new Promise(r => setTimeout(r, 0))
+  proc.emit({ type: 'agent_settled' })
+
+  assert.deepEqual(await p, { stopReason: 'end_turn' })
+  assert.equal(proc.getSessionStatsCount, 2)
+  assert.equal(
+    conn.updates.some(u => u.update.sessionUpdate === 'usage_update'),
+    false
+  )
+})
+
+test('PiAcpSession: get_session_stats timeout does not block the prompt', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  // The timeout lives in PiRpcProcess.request (see test/unit/pi-rpc-request-timeout.test.ts);
+  // from the session's point of view it surfaces as a rejection.
+  proc.sessionStatsError = new Error('pi get_session_stats timed out after 1000ms')
+  const session = makeUsageSession(proc, conn)
+
+  const p = session.prompt('hello')
+  await new Promise(r => setTimeout(r, 0))
+  proc.emit({ type: 'agent_settled' })
+
+  assert.deepEqual(await p, { stopReason: 'end_turn' })
+  assert.equal(proc.getSessionStatsCount, 2)
+  assert.equal(
+    conn.updates.some(u => u.update.sessionUpdate === 'usage_update'),
+    false
+  )
+})
+
+test('PiAcpSession: cancelled turn still reports cancelled after usage publish', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  proc.sessionStats = { ...usageStats(0, 0, 0), contextUsage: { tokens: 42, contextWindow: 100 } }
+  const session = makeUsageSession(proc, conn)
+
+  const p = session.prompt('hello')
+  await new Promise(r => setTimeout(r, 0))
+  await session.cancel()
+  proc.emit({ type: 'agent_settled' })
+
+  assert.deepEqual(await p, { stopReason: 'cancelled', usage: zeroUsage })
+  assert.deepEqual(
+    conn.updates.filter(u => u.update.sessionUpdate === 'usage_update').map(u => u.update).at(-1),
+    { sessionUpdate: 'usage_update', used: 42, size: 100, cost: { amount: 0, currency: 'USD' } }
+  )
 })
