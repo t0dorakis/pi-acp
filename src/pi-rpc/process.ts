@@ -109,6 +109,8 @@ export class PiRpcProcess {
   private readonly child: ChildProcessWithoutNullStreams
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
+  private exitError?: Error
+  private exitHandler?: (err: Error) => void
   private readonly preludeLines: string[] = []
 
   private constructor(child: ChildProcessWithoutNullStreams) {
@@ -141,6 +143,8 @@ export class PiRpcProcess {
 
     child.on('exit', (code, signal) => {
       const err = new Error(`pi process exited (code=${code}, signal=${signal})`)
+      this.exitError = err
+      this.exitHandler?.(err)
       for (const [, p] of this.pending) p.reject(err)
       this.pending.clear()
     })
@@ -231,9 +235,14 @@ export class PiRpcProcess {
     return proc
   }
 
-  onEvent(handler: (ev: PiRpcEvent) => void): () => void {
+  onEvent(handler: (ev: PiRpcEvent) => void, onExit?: (err: Error) => void): () => void {
+    if (onExit) {
+      this.exitHandler = onExit
+      if (this.exitError) onExit(this.exitError)
+    }
     this.eventHandlers.push(handler)
     return () => {
+      if (this.exitHandler === onExit) this.exitHandler = undefined
       this.eventHandlers = this.eventHandlers.filter(h => h !== handler)
     }
   }
@@ -366,6 +375,7 @@ export class PiRpcProcess {
   }
 
   private request(cmd: PiRpcCommand, opts?: { timeoutMs?: number }): Promise<PiRpcResponse> {
+    if (this.exitError) return Promise.reject(this.exitError)
     const id = crypto.randomUUID()
     const withId = { ...cmd, id }
     const timeoutMs = opts?.timeoutMs
