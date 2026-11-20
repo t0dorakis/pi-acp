@@ -36,7 +36,9 @@ export class FakePiRpcProcess {
   /** When set, `getSessionStats()` rejects with this error. */
   sessionStatsError: unknown = null
 
-  onEvent(handler: (ev: PiRpcEvent) => void): () => void {
+  exit = (_err: Error) => {}
+  onEvent(handler: (ev: PiRpcEvent) => void, onExit?: (err: Error) => void): () => void {
+    if (onExit) this.exit = onExit
     this.handlers.push(handler)
     return () => {
       this.handlers = this.handlers.filter(h => h !== handler)
@@ -62,7 +64,6 @@ export class FakePiRpcProcess {
   async getState(): Promise<any> {
     return {}
   }
-
 
   async getAvailableModels(): Promise<any> {
     return { models: [{ provider: 'test', id: 'model', name: 'model' }] }

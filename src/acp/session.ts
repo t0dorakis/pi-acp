@@ -350,7 +350,15 @@ export class PiAcpSession {
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []
 
-    this.proc.onEvent(ev => this.handlePiEvent(ev))
+    this.proc.onEvent(
+      ev => this.handlePiEvent(ev),
+      error => {
+        this.pendingTurn?.reject(error)
+        this.pendingTurn = null
+        this.finishingTurn = null
+        for (const queued of this.turnQueue.splice(0)) queued.reject(error)
+      }
+    )
   }
 
   setStartupInfo(text: string) {
