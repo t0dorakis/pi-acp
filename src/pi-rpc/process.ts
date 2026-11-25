@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as readline from 'node:readline'
+import { stripVTControlCharacters } from 'node:util'
 import crossSpawn from 'cross-spawn'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
 
@@ -26,6 +27,47 @@ const ANSI_ESCAPE_REGEX = new RegExp(
 function stripAnsi(s: string): string {
   // Basic ANSI escape stripping (colors, cursor movement, etc.)
   return s.replace(ANSI_ESCAPE_REGEX, '')
+}
+
+const STDERR_TAIL_BYTES = 8192
+const STDERR_DRAIN_MS = 250
+
+function describeStderr(tail: Buffer): string {
+  const text = stripVTControlCharacters(tail.toString('utf8')).replaceAll('\\', '/')
+  const errors = [
+    ...text.matchAll(
+      /^(Error|TypeError|ReferenceError|RangeError|SyntaxError|AssertionError|AggregateError)(?: \[(ERR_[A-Z_]+)\])?:([^\n]*)(?:\n((?:[ \t]+at [^\n]+\n?)*))?/gm
+    )
+  ]
+  const lastError = errors.at(-1)
+  const frames = lastError?.[4] ?? ''
+  // Never emit child text, even on an unknown error: it may contain credentials or user data.
+  const fault = /heap out of memory|Allocation failed - JavaScript heap/i.test(text)
+    ? 'JavaScript heap out of memory'
+    : lastError?.[1]
+  const runtimeCode = lastError?.[2] ?? lastError?.[3]?.trimStart().split(/[\s:]/, 1)[0]
+  const knownCode = [
+    'ERR_STREAM_DESTROYED',
+    'ERR_UNHANDLED_REJECTION',
+    'ERR_ASSERTION',
+    'ERR_WORKER_OUT_OF_MEMORY',
+    'ENOSPC',
+    'EDQUOT',
+    'EACCES',
+    'EPERM',
+    'EPIPE',
+    'ECONNRESET',
+    'ETIMEDOUT'
+  ].find(code => code === runtimeCode)
+  const source = /(?:\/extensions\/|pi-lean-subagents|pi-model-stream-guard)/.test(frames)
+    ? 'extension'
+    : /\/modes\/rpc\//.test(frames)
+      ? 'Pi RPC'
+      : /\/(?:pi-ai|openai|undici)\//.test(frames)
+        ? 'provider client'
+        : undefined
+  if (!fault) return tail.length ? 'unclassified stderr' : 'no stderr'
+  return [fault, knownCode, source && `stack: ${source}`].filter(Boolean).join(', ')
 }
 
 type PiRpcCommand =
@@ -141,12 +183,34 @@ export class PiRpcProcess {
       for (const h of this.eventHandlers) h(msg as PiRpcEvent)
     })
 
-    child.on('exit', (code, signal) => {
-      const err = new Error(`pi process exited (code=${code}, signal=${signal})`)
-      this.exitError = err
-      this.exitHandler?.(err)
-      for (const [, p] of this.pending) p.reject(err)
-      this.pending.clear()
+    let stderrTail = Buffer.alloc(0)
+    child.stderr.on('data', (chunk: Buffer) => {
+      if (this.exitError) return
+      stderrTail =
+        chunk.length >= STDERR_TAIL_BYTES
+          ? Buffer.from(chunk.subarray(-STDERR_TAIL_BYTES))
+          : Buffer.concat([
+              stderrTail.subarray(Math.max(0, stderrTail.length + chunk.length - STDERR_TAIL_BYTES)),
+              chunk
+            ])
+    })
+
+    child.once('exit', (code, signal) => {
+      // Exit can precede the last pipe data. A descendant holding stderr open must not stall the turn.
+      const finish = () => {
+        clearTimeout(timer)
+        child.stderr.off('close', finish)
+        const diagnosis = describeStderr(stderrTail)
+        stderrTail = Buffer.alloc(0)
+        const err = new Error(`pi process exited (code=${code}, signal=${signal}); ${diagnosis}`)
+        this.exitError = err
+        this.exitHandler?.(err)
+        for (const [, p] of this.pending) p.reject(err)
+        this.pending.clear()
+      }
+      const timer = setTimeout(finish, STDERR_DRAIN_MS)
+      if (child.stderr.closed) finish()
+      else child.stderr.once('close', finish)
     })
 
     child.on('error', err => {
@@ -209,10 +273,6 @@ export class PiRpcProcess {
 
       throw new PiRpcSpawnError(`Could not start pi (command: ${cmd}).`, { code, cause: e })
     }
-
-    child.stderr.on('data', () => {
-      // leave stderr untouched; ACP clients may capture it.
-    })
 
     const proc = new PiRpcProcess(child)
 
