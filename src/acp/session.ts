@@ -568,7 +568,7 @@ export class PiAcpSession {
     pending.beforeUsage = await this.readUsageSnapshot()
     this.emitUsageSnapshot(pending.beforeUsage)
 
-    if (this.pendingTurn !== pending) return
+    if (this.pendingTurn !== pending || this.proc.hasExited) return
     if (this.cancelRequested) {
       await this.finishTurn({ stopReason: 'cancelled' }, false)
       return
@@ -601,7 +601,8 @@ export class PiAcpSession {
     this.emitUsageSnapshot(afterUsage)
     await this.flushEmits()
 
-    if (this.pendingTurn !== pending) return
+    // The process exit handler owns settlement while stderr drains.
+    if (this.pendingTurn !== pending || this.proc.hasExited) return
 
     const finalOutcome = this.cancelRequested ? ({ stopReason: 'cancelled' } as const) : outcome
     if ('error' in finalOutcome) {

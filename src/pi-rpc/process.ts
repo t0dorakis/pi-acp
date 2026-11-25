@@ -151,6 +151,7 @@ export class PiRpcProcess {
   private readonly child: ChildProcessWithoutNullStreams
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
+  private exitDiagnosis?: Promise<Error>
   private exitError?: Error
   private exitHandler?: (err: Error) => void
   private readonly preludeLines: string[] = []
@@ -197,23 +198,28 @@ export class PiRpcProcess {
 
     child.once('exit', (code, signal) => {
       // Exit can precede the last pipe data. A descendant holding stderr open must not stall the turn.
-      const finish = () => {
-        clearTimeout(timer)
-        child.stderr.off('close', finish)
-        const diagnosis = describeStderr(stderrTail)
-        stderrTail = Buffer.alloc(0)
-        const err = new Error(`pi process exited (code=${code}, signal=${signal}); ${diagnosis}`)
+      this.exitDiagnosis = new Promise<Error>(resolve => {
+        const finish = () => {
+          clearTimeout(timer)
+          child.stderr.off('close', finish)
+          const diagnosis = describeStderr(stderrTail)
+          stderrTail = Buffer.alloc(0)
+          resolve(new Error(`pi process exited (code=${code}, signal=${signal}); ${diagnosis}`))
+        }
+        const timer = setTimeout(finish, STDERR_DRAIN_MS)
+        if (child.stderr.closed) finish()
+        else child.stderr.once('close', finish)
+      })
+      void this.exitDiagnosis.then(err => {
         this.exitError = err
         this.exitHandler?.(err)
         for (const [, p] of this.pending) p.reject(err)
         this.pending.clear()
-      }
-      const timer = setTimeout(finish, STDERR_DRAIN_MS)
-      if (child.stderr.closed) finish()
-      else child.stderr.once('close', finish)
+      })
     })
 
     child.on('error', err => {
+      if (this.hasExited) return
       for (const [, p] of this.pending) p.reject(err)
       this.pending.clear()
     })
@@ -293,6 +299,10 @@ export class PiRpcProcess {
     }
 
     return proc
+  }
+
+  get hasExited(): boolean {
+    return this.exitDiagnosis !== undefined
   }
 
   onEvent(handler: (ev: PiRpcEvent) => void, onExit?: (err: Error) => void): () => void {
@@ -435,7 +445,7 @@ export class PiRpcProcess {
   }
 
   private request(cmd: PiRpcCommand, opts?: { timeoutMs?: number }): Promise<PiRpcResponse> {
-    if (this.exitError) return Promise.reject(this.exitError)
+    if (this.exitDiagnosis) return this.exitDiagnosis.then(error => Promise.reject(error))
     const id = crypto.randomUUID()
     const withId = { ...cmd, id }
     const timeoutMs = opts?.timeoutMs
@@ -469,7 +479,7 @@ export class PiRpcProcess {
       if (timeoutMs !== undefined) {
         timer = setTimeout(() => {
           timer = undefined
-          if (!this.pending.delete(id)) return
+          if (this.hasExited || !this.pending.delete(id)) return
           reject(new Error(`pi ${cmd.type} timed out after ${timeoutMs}ms`))
         }, timeoutMs)
         // Never let an auxiliary request keep the event loop alive.
@@ -477,7 +487,7 @@ export class PiRpcProcess {
       }
 
       void this.writeLine(line).catch(error => {
-        if (!drop()) return
+        if (this.hasExited || !drop()) return
         reject(error)
       })
     })
